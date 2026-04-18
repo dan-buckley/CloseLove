@@ -1,0 +1,15 @@
+{
+  "folders": [
+    {
+      "path": "."
+    }
+  ],
+  "settings": {
+    "editor.formatOnSave": true,
+    "files.associations": {
+      "*.ino": "cpp",
+      "*.cpp": "cpp",
+      "*.h": "cpp"
+    }
+  }
+}
