@@ -38,3 +38,9 @@ void setHeartZone(uint8_t zone);
 // Advance the LED animation and push the new frame to the strip.
 // Call every loop() iteration. Never blocks — uses millis() internally.
 void ledsUpdate();
+
+// Enable or disable the boot searching animation.
+// While true, ledsUpdate() chases a single red pixel around the heart
+// instead of showing a zone. Call ledsSetSearching(false) once the RSSI
+// buffer is fully seeded (RSSI_SAMPLES packets received).
+void ledsSetSearching(bool searching);

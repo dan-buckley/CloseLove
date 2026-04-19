@@ -78,6 +78,10 @@ static const uint8_t FILL_ORDER[NEO_COUNT] = {0, 1, 7, 2, 6, 3, 5, 4};
 // Active zone, clamped to 1–5.
 static uint8_t currentZone = 1;
 
+// Boot searching mode: true until the RSSI buffer is fully seeded.
+// ledsUpdate() shows a chaser instead of the zone animation while this is set.
+static bool isSearching = true;
+
 // ── Internal helpers ───────────────────────────────────────────────────────
 
 // Scale a packed 0x00RRGGBB colour by brightness (0–255).
@@ -124,10 +128,25 @@ void setHeartZone(uint8_t zone)
     currentZone = zone;
 }
 
+void ledsSetSearching(bool searching)
+{
+    isSearching = searching;
+}
+
 // Compute and push one animation frame to the strip.
 // Must be called every loop() iteration.
 void ledsUpdate()
 {
+    if (isSearching)
+    {
+        // Chase a single dim-red pixel around the heart at ~100 ms per step.
+        uint8_t pos = (uint8_t)((millis() / 100) % NEO_COUNT);
+        strip.clear();
+        strip.setPixelColor(FILL_ORDER[pos], strip.Color(80, 0, 0));
+        strip.show();
+        return;
+    }
+
     uint8_t zoneIdx = currentZone - 1; // convert 1-based zone to 0-based index
     uint8_t numLeds = ZONE_LED_COUNT[zoneIdx];
     uint32_t colour = ZONE_COLOUR[zoneIdx];

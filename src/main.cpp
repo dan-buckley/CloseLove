@@ -47,6 +47,7 @@ unsigned long lastTx = 0;
 unsigned long lastRx = 0;         // timestamp of the most recent received packet
 bool hasSignal = false;           // true once the first packet has arrived
 uint8_t currentZone = 1;          // zone currently displayed (1–5); reset on signal loss
+uint8_t bootSamples = 0;          // counts RX packets until the RSSI buffer is fully seeded
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -206,6 +207,13 @@ void loop()
 
             int rawRssi = rf69.lastRssi();
             int smoothRssi_ = smoothRssi(rawRssi);
+
+            // Exit searching animation once the buffer is fully seeded
+            if (bootSamples < RSSI_SAMPLES)
+            {
+                if (++bootSamples == RSSI_SAMPLES)
+                    ledsSetSearching(false);
+            }
 
             // Map to zone and drive NeoPixel heart
             setHeartZone(rssiToZone(smoothRssi_));
