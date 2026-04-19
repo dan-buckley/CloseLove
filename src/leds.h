@@ -23,6 +23,16 @@
 // Total number of WS2812B LEDs in the chain
 #define NEO_COUNT 8
 
+// Overall brightness scale (0–255). Reduce to dim all LEDs without
+// changing zone proportions. 200 ≈ 78% of full brightness.
+#define LED_BRIGHTNESS 200
+
+// Zone cross-fade duration in milliseconds.
+#define TRANSITION_MS 1500
+
+// Heartbeat pulse period in milliseconds (1000 ms = 60 bpm).
+#define HEARTBEAT_MS 1000
+
 // ── Public API ─────────────────────────────────────────────────────────────
 
 // Initialise the NeoPixel strip and blank all LEDs.

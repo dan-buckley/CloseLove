@@ -37,17 +37,7 @@ static const uint8_t ZONE_PEAK[5] = {
     38,  // Zone 2: ~15%
     64,  // Zone 3: ~25%
     102, // Zone 4: ~40%
-    153, // Zone 5: ~60% (solid, no pulse)
-};
-
-// Breathing period in milliseconds for zones 1–4.
-// Shorter = faster pulse. Zone 5 entry is unused (solid).
-static const uint16_t ZONE_PERIOD_MS[5] = {
-    4000, // Zone 1: long, slow breath
-    3000, // Zone 2: medium breath
-    2000, // Zone 3: quicker breath
-    1000, // Zone 4: fast pulse
-    0,    // Zone 5: solid — not used
+    153, // Zone 5: ~60%
 };
 
 // Base colour for each zone as a packed 0x00RRGGBB value.
@@ -75,8 +65,12 @@ static const uint8_t FILL_ORDER[NEO_COUNT] = {0, 1, 7, 2, 6, 3, 5, 4};
 
 // ── Module state ───────────────────────────────────────────────────────────
 
-// Active zone, clamped to 1–5.
+// Active zone and previous zone for cross-fade blending (both clamped to 1–5).
 static uint8_t currentZone = 1;
+static uint8_t prevZone = 1;
+
+// millis() timestamp when the last zone transition started.
+static uint32_t transitionStart = 0;
 
 // Boot searching mode: true until the RSSI buffer is fully seeded.
 // ledsUpdate() shows a chaser instead of the zone animation while this is set.
@@ -84,13 +78,13 @@ static bool isSearching = true;
 
 // ── Internal helpers ───────────────────────────────────────────────────────
 
-// Scale a packed 0x00RRGGBB colour by brightness (0–255).
-// Each channel is multiplied by (brightness / 255) using integer arithmetic.
+// Scale a packed 0x00RRGGBB colour by brightness (0–255) then by LED_BRIGHTNESS.
 static uint32_t scaleColour(uint32_t colour, uint8_t brightness)
 {
-    uint8_t r = (uint8_t)(((colour >> 16) & 0xFF) * brightness / 255);
-    uint8_t g = (uint8_t)(((colour >> 8) & 0xFF) * brightness / 255);
-    uint8_t b = (uint8_t)((colour & 0xFF) * brightness / 255);
+    uint16_t scaled = (uint16_t)brightness * LED_BRIGHTNESS / 255;
+    uint8_t r = (uint8_t)(((colour >> 16) & 0xFF) * scaled / 255);
+    uint8_t g = (uint8_t)(((colour >> 8) & 0xFF) * scaled / 255);
+    uint8_t b = (uint8_t)((colour & 0xFF) * scaled / 255);
     return strip.Color(r, g, b);
 }
 
@@ -103,7 +97,8 @@ static uint8_t pulseLevel(uint8_t peakBrightness, uint16_t periodMs)
     float phase = (float)(millis() % (uint32_t)periodMs) / (float)periodMs;
 
     // sine goes -1 → +1 over one full cycle; shift and scale to 0 → 1
-    float t = (sinf(phase * 2.0f * (float)M_PI) + 1.0f) * 0.5f;
+    // sine goes -1 → +1; scale to 0.5 → 1.0 so the pulse never goes below 50%
+    float t = (sinf(phase * 2.0f * (float)M_PI) + 1.0f) * 0.25f + 0.5f;
 
     return (uint8_t)(peakBrightness * t);
 }
@@ -125,7 +120,12 @@ void setHeartZone(uint8_t zone)
         zone = 1;
     if (zone > 5)
         zone = 5;
-    currentZone = zone;
+    if (zone != currentZone)
+    {
+        prevZone = currentZone;
+        currentZone = zone;
+        transitionStart = millis();
+    }
 }
 
 void ledsSetSearching(bool searching)
@@ -139,37 +139,46 @@ void ledsUpdate()
 {
     if (isSearching)
     {
-        // Chase a single dim-red pixel around the heart at ~100 ms per step.
+        // Chase a single dim-red pixel around the heart, scaled by LED_BRIGHTNESS.
         uint8_t pos = (uint8_t)((millis() / 100) % NEO_COUNT);
+        uint8_t chaserBright = (uint8_t)(80U * LED_BRIGHTNESS / 255);
         strip.clear();
-        strip.setPixelColor(FILL_ORDER[pos], strip.Color(80, 0, 0));
+        strip.setPixelColor(FILL_ORDER[pos], strip.Color(chaserBright, 0, 0));
         strip.show();
         return;
     }
 
-    uint8_t zoneIdx = currentZone - 1; // convert 1-based zone to 0-based index
-    uint8_t numLeds = ZONE_LED_COUNT[zoneIdx];
-    uint32_t colour = ZONE_COLOUR[zoneIdx];
-    uint8_t peak = ZONE_PEAK[zoneIdx];
+    // ── Zone transition blend factor (0 = previous zone, 1 = current zone) ──
+    float t = 1.0f;
+    uint32_t elapsed = millis() - transitionStart;
+    if (elapsed < TRANSITION_MS)
+        t = (float)elapsed / (float)TRANSITION_MS;
 
-    // Zone 5 is solid; all other zones breathe.
-    uint8_t brightness;
-    if (currentZone == 5)
-    {
-        brightness = peak;
-    }
-    else
-    {
-        brightness = pulseLevel(peak, ZONE_PERIOD_MS[zoneIdx]);
-    }
+    uint8_t prevIdx = prevZone - 1;
+    uint8_t curIdx = currentZone - 1;
+    float inv = 1.0f - t;
 
-    // Build the frame: light only the LEDs for this zone, in symmetric order.
+    // ── Blend LED count ────────────────────────────────────────────────────
+    uint8_t numLeds = (uint8_t)(ZONE_LED_COUNT[prevIdx] * inv + ZONE_LED_COUNT[curIdx] * t + 0.5f);
+
+    // ── Blend colour channels ──────────────────────────────────────────────
+    uint32_t pc = ZONE_COLOUR[prevIdx];
+    uint32_t cc = ZONE_COLOUR[curIdx];
+    uint8_t cr = (uint8_t)(((pc >> 16) & 0xFF) * inv + ((cc >> 16) & 0xFF) * t);
+    uint8_t cg = (uint8_t)(((pc >> 8) & 0xFF) * inv + ((cc >> 8) & 0xFF) * t);
+    uint8_t cb = (uint8_t)((pc & 0xFF) * inv + (cc & 0xFF) * t);
+    uint32_t blendedColour = ((uint32_t)cr << 16) | ((uint32_t)cg << 8) | cb;
+
+    // ── Blend peak brightness ──────────────────────────────────────────────
+    uint8_t blendedPeak = (uint8_t)(ZONE_PEAK[prevIdx] * inv + ZONE_PEAK[curIdx] * t);
+
+    // ── 60 bpm heartbeat pulse applied to all zones ────────────────────────
+    uint8_t brightness = pulseLevel(blendedPeak, HEARTBEAT_MS);
+
+    // ── Build frame ────────────────────────────────────────────────────────
     strip.clear();
-    uint32_t scaledColour = scaleColour(colour, brightness);
+    uint32_t scaledColour = scaleColour(blendedColour, brightness);
     for (uint8_t i = 0; i < numLeds; i++)
-    {
         strip.setPixelColor(FILL_ORDER[i], scaledColour);
-    }
-
     strip.show();
 }
