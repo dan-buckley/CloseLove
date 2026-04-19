@@ -10,6 +10,8 @@
       "*.ino": "cpp",
       "*.cpp": "cpp",
       "*.h": "cpp"
-    }
+    },
+    "platformio-ide.useBuiltinPIOCore": true,
+    "platformio-ide.customPATH": "/Users/danbuckley/.platformio/penv/bin"
   }
 }
