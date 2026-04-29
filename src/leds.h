@@ -1,8 +1,8 @@
 // leds.h — NeoPixel heart-ring driver for CloseLove
 //
 // Controls 8 WS2812B LEDs arranged in a heart shape.
-// Zone 1 (far) = single dim blue pulse.
-// Zone 5 (close) = all eight LEDs, solid red at 60% brightness.
+// Zone 1 (close) = all eight LEDs, warm red at 60% brightness.
+// Zone 5 (far) = single dim blue pulse.
 //
 // Usage:
 //   setup()  → ledsInit()
@@ -33,6 +33,15 @@
 // Heartbeat pulse period in milliseconds (1000 ms = 60 bpm).
 #define HEARTBEAT_MS 1000
 
+// How long each LED-count step holds before the sequence advances (ms).
+// Must be a multiple of HEARTBEAT_MS. 2000 = two full brightness pulses
+// are visible at each LED count as the heart grows and shrinks back.
+#define BEAT_STEP_MS 2000
+
+// Slow colour-pulse period in milliseconds — independent of the heartbeat.
+// Very subtle shimmer: only ±6% variation so it never fights the beat.
+#define COLOUR_PULSE_MS 6000
+
 // ── Public API ─────────────────────────────────────────────────────────────
 
 // Initialise the NeoPixel strip and blank all LEDs.
@@ -40,10 +49,14 @@
 void ledsInit();
 
 // Set the active proximity zone (1 – 5).
-//   1 = farthest away (dim, slow blue pulse)
-//   5 = closest (solid red, 60% brightness)
+//   1 = closest (warm red, 60% brightness)
+//   5 = farthest away (dim, slow blue pulse)
 // The display does not change until the next ledsUpdate() call.
 void setHeartZone(uint8_t zone);
+
+// Switch the boot-searching chaser on (true) or off (false).
+// Called from main.cpp once the RSSI buffer is fully seeded.
+void ledsSetSearching(bool searching);
 
 // Advance the LED animation and push the new frame to the strip.
 // Call every loop() iteration. Never blocks — uses millis() internally.

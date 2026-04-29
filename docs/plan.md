@@ -10,7 +10,7 @@
 Each unit continuously broadcasts a short radio ping via its RFM69HCW transceiver.
 When it receives a ping back from the paired unit it reads the signal strength (RSSI).
 The stronger the signal the closer the units are. RSSI is mapped to one of five
-distance zones. Zone 1 (far away) shows a single, dimly-pulsing blue LED. Zone 5
+distance zones. Zone 5 (far away) shows a single, dimly-pulsing blue LED. Zone 1
 (close together) lights all eight LEDs to a warm red at 60 % brightness.
 The two units are hardware-identical; the only difference is the NODE_ID value
 compiled into each one (see §7).
@@ -88,45 +88,123 @@ Feather Pin 6 ── LED0 DIN   [direct for now — 300 Ω + 100 µF upgrades in
 
 ### 3c. Heart-shape LED positions
 
-LEDs are numbered 0 – 7 in chain order. Place them around the heart outline
-so the wire runs continuously around the perimeter:
+LEDs are numbered 0 – 7 in chain order. Wiring runs from LED 0 (top centre dip)
+down the right side to the bottom point, then back up the left side.
 
 ```
-        [1]   [2]
-     [0]         [3]
-        [7]   [4]
-           [6][5]
+         [7]  [0]  [1]
+        /               \
+      [6]                 [2]
+        \               /
+         [5]         [3]
+            \       /
+              \ [4]/
+               \/
 ```
 
-| Index | Position     | Chain order |
-|-------|-------------|-------------|
-| 0     | Left side    | 1st in chain |
-| 1     | Upper-left bump | 2nd |
-| 2     | Upper-right bump | 3rd |
-| 3     | Right side   | 4th |
-| 4     | Lower-right  | 5th |
-| 5     | Bottom-right | 6th |
-| 6     | Bottom-left  | 7th |
-| 7     | Lower-left   | 8th (last) |
+| Index | Position              | Side |
+|-------|-----------------------|------|
+| 0     | Top centre (the dip)  | Centre |
+| 1     | Top-right bump        | Right |
+| 2     | Upper-right side      | Right |
+| 3     | Lower-right side      | Right |
+| 4     | Bottom point          | Centre |
+| 5     | Lower-left side       | Left |
+| 6     | Upper-left side       | Left |
+| 7     | Top-left bump         | Left |
 
-> When Zone 1 is active only LED 0 lights up (the first in the chain). As zones
-> increase, LEDs are added outward around the heart: 0→1→7→2→6→3→5→4 so the
-> lit portion always looks symmetrical from the wearer's point of view.
+> When Zone 5 is active only LED 0 lights up (top centre). As zones decrease
+> toward Zone 1, LEDs are added symmetrically outward: 0 → 1+7 → 2+6 → 3+5 → 4,
+> so the lit area grows evenly down both sides toward the bottom point.
 
 ---
 
 ## 4. Distance zones
 
-| Zone | Approx. distance | LEDs on | Behaviour | Colour |
-|------|-----------------|---------|-----------|--------|
-| 1 | Far (> ~10 m) | 1 | Slow breathing pulse, ~8 % peak brightness | Blue (#0000FF) |
-| 2 | ~5 – 10 m | 3 | Slow breathing pulse, ~15 % peak | Blue-purple (#4400FF) |
-| 3 | ~2 – 5 m | 5 | Gentle pulse, ~25 % peak | Purple (#AA00CC) |
-| 4 | ~1 – 2 m | 7 | Faster pulse, ~40 % peak | Orange-red (#FF4400) |
-| 5 | Close (< ~1 m) | 8 | Solid on, 60 % brightness | Red (#FF0000) |
+| Zone | Approx. distance | Base LEDs | Behaviour | Colour |
+|------|-----------------|-----------|-----------|--------|
+| 1 | Close (< ~1 m) | 8 | Slow sine breathing 30%→100%→30% over 2 s | Red (#FF0000) |
+| 2 | ~1 – 2 m | 7 | Growing heartbeat — sine pulse expanding from bottom | Orange-red (#FF4400) |
+| 3 | ~2 – 5 m | 5 | Growing heartbeat — sine pulse expanding from bottom | Purple (#AA00CC) |
+| 4 | ~5 – 10 m | 3 | Growing heartbeat — sine pulse expanding from bottom | Blue-purple (#4400FF) |
+| 5 | Far (> ~10 m) | 1 | Growing heartbeat — sine pulse expanding from bottom | Blue (#0000FF) |
 
-> RSSI thresholds are starting-point estimates (defined in `main.cpp`). They
+> RSSI thresholds are starting-point estimates (defined in `config.h`). They
 > **must be calibrated** in the real environment (see Module 6).
+
+### 4a. Growing heartbeat animation (Zones 2–5)
+
+Each beat is one full sine cycle (0% → 100% → 0%, period = `HEARTBEAT_MS` = 1 s).
+The heart expands from the bottom point (LED 4) outward one row per beat, reaches
+full size, then contracts back — the sequence repeats every `BEAT_STEP_MS` = 2 s
+(i.e. two heartbeats per row step). The starting row differs per zone.
+
+**LED brightness behaviour within each beat:**
+
+| LED type | Brightness curve |
+|----------|------------------|
+| Stable (same in previous and next step) | `max(50%, sine)` — floor at 50%, never fully dark |
+| Incoming (new this step, absent last step) | `sine` — fades in from 0% at trough, joins stable LEDs at the rising 50% crossing |
+| Outgoing (present this step, absent next step) | `sine` — fades out to 0% at trough before the step changes |
+
+Step changes are committed only at the trough (`beatPhase < 5%`) so that
+incoming LEDs always begin their rise from near-zero with no visible pop.
+
+All active LEDs in a step pulse together in that zone's colour.
+
+**LED rows expanding outward from the bottom point:**
+
+```
+Row 1 (innermost):  [4]                        — 1 LED
+Row 2:              [3]  [4]  [5]              — 3 LEDs
+Row 3:              [2]  [3]  [4]  [5]  [6]   — 5 LEDs
+Row 4:         [1]  [2]  [3]  [4]  [5]  [6]  [7]  — 7 LEDs
+Row 5 (full):  [0]  [1]  [2]  [3]  [4]  [5]  [6]  [7]  — 8 LEDs
+```
+
+**Zone 5** starts at Row 1 and expands to full, then contracts back:
+
+| Beat | LEDs lit |
+|------|----------|
+| 1 | 4 |
+| 2 | 3, 4, 5 |
+| 3 | 2, 3, 4, 5, 6 |
+| 4 | 1, 2, 3, 4, 5, 6, 7 |
+| 5 | 0, 1, 2, 3, 4, 5, 6, 7 (all) |
+| 6 | 1, 2, 3, 4, 5, 6, 7 |
+| 7 | 2, 3, 4, 5, 6 |
+| 8 | 3, 4, 5 |
+| 9 | 4 → repeat |
+
+**Zone 4** starts at Row 2 (3 LEDs) and expands to full, then contracts:
+
+| Beat | LEDs lit |
+|------|----------|
+| 1 | 3, 4, 5 |
+| 2 | 2, 3, 4, 5, 6 |
+| 3 | 1, 2, 3, 4, 5, 6, 7 |
+| 4 | 0, 1, 2, 3, 4, 5, 6, 7 (all) |
+| 5 | 1, 2, 3, 4, 5, 6, 7 |
+| 6 | 2, 3, 4, 5, 6 |
+| 7 | 3, 4, 5 → repeat |
+
+**Zone 2** starts at Row 4 (7 LEDs); LED 0 (top centre) pulses in and out:
+
+| Beat | LEDs lit |
+|------|----------|
+| 1 | 1, 2, 3, 4, 5, 6, 7 |
+| 2 | 0, 1, 2, 3, 4, 5, 6, 7 (all) |
+| 3 | 1, 2, 3, 4, 5, 6, 7 → repeat |
+
+**Zone 3** starts at Row 3 (5 LEDs) and expands to full, then contracts:
+
+| Beat | LEDs lit |
+|------|----------|
+| 1 | 2, 3, 4, 5, 6 |
+| 2 | 1, 2, 3, 4, 5, 6, 7 |
+| 3 | 0, 1, 2, 3, 4, 5, 6, 7 (all) |
+| 4 | 1, 2, 3, 4, 5, 6, 7 |
+| 5 | 2, 3, 4, 5, 6 → repeat |
 
 ---
 
@@ -200,7 +278,7 @@ serial alongside raw RSSI.
 | # | Task |
 |---|------|
 | 5.1 | Wire zone output into `setHeartZone()` call in the main loop |
-| 5.2 | Handle "no signal / timeout" state — fall back to Zone 1 after 2 s of no RX |
+| 5.2 | Handle "no signal / timeout" state — fall back to Zone 5 after 2 s of no RX |
 | 5.3 | Walk-test: move the units apart and together and observe the heart react correctly |
 
 ---
@@ -279,3 +357,11 @@ is which when re-flashing.
 - Battery-level indicator (fade everything red when AA voltage drops below 3.6 V)
 - Haptic motor pulse on zone change
 - Over-the-air NODE_ID selection (button hold at boot)
+
+**Button control (v2 — fits on 32u4, ~1.5 KB flash overhead)**
+- One button wired to a free pin (9, 10, or 12) with `INPUT_PULLUP`; connects to GND — no external resistor needed
+- Simple state-machine debouncer (~50 lines, no library required)
+- Single press → cycle to the next animation mode
+- Double press → cycle through colour palette options
+- Long press → step through brightness levels (e.g. 25% / 50% / 75%)
+- New animation modes: use integer lookup tables (16-entry `uint8_t` sine table) rather than `sinf()` to keep flash cost low

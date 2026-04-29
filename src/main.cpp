@@ -42,11 +42,11 @@ unsigned long lastTx = 0;
 
 // ── Module 3 — radio timeout ──────────────────────────────────────────────
 // If no packet is received within this window, the link is considered lost
-// and the display falls back to Zone 1 (dim blue pulse).
+// and the display falls back to Zone 5 (dim blue pulse).
 #define NO_SIGNAL_TIMEOUT_MS 2000 // ms before declaring signal lost
 unsigned long lastRx = 0;         // timestamp of the most recent received packet
 bool hasSignal = false;           // true once the first packet has arrived
-uint8_t currentZone = 1;          // zone currently displayed (1–5); reset on signal loss
+uint8_t currentZone = 5;          // zone currently displayed (1–5); reset on signal loss
 uint8_t bootSamples = 0;          // counts RX packets until the RSSI buffer is fully seeded
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -89,28 +89,29 @@ int rssitoBrightness(int rssi)
  */
 uint8_t rssiToZone(int rssi)
 {
-    // Entry threshold for each zone (index = zone number; indices 0 and 1 unused)
-    static const int thresholds[6] = {0, 0, RSSI_Z2, RSSI_Z3, RSSI_Z4, RSSI_Z5};
+    // Entry threshold for each zone (index = zone number; index 0 and 5 unused)
+    // Zone 1 is closest (strongest RSSI); zone 5 is farthest.
+    static const int thresholds[6] = {0, RSSI_Z1, RSSI_Z2, RSSI_Z3, RSSI_Z4, 0};
 
     // Compute raw zone directly from config thresholds
     uint8_t raw;
-    if (rssi >= RSSI_Z5)
-        raw = 5;
-    else if (rssi >= RSSI_Z4)
-        raw = 4;
-    else if (rssi >= RSSI_Z3)
-        raw = 3;
+    if (rssi >= RSSI_Z1)
+        raw = 1;
     else if (rssi >= RSSI_Z2)
         raw = 2;
+    else if (rssi >= RSSI_Z3)
+        raw = 3;
+    else if (rssi >= RSSI_Z4)
+        raw = 4;
     else
-        raw = 1;
+        raw = 5;
 
-    if (raw > currentZone)
+    if (raw < currentZone)
     {
-        // Getting closer — upgrade immediately
+        // Getting closer — upgrade (lower zone number) immediately
         currentZone = raw;
     }
-    else if (raw < currentZone)
+    else if (raw > currentZone)
     {
         // Moving apart — only downgrade once past the hysteresis band
         if (rssi < thresholds[currentZone] - RSSI_HYSTERESIS)
@@ -169,9 +170,9 @@ void setup()
 
     initRssiBuffer();
 
-    // Initialise the NeoPixel strip — blanks all LEDs, starts at Zone 1
+    // Initialise the NeoPixel strip — blanks all LEDs, starts at Zone 5 (far/no signal)
     ledsInit();
-    setHeartZone(1);
+    setHeartZone(5);
 
     Serial.print(F("CloseLove node "));
     Serial.print(NODE_ID);
@@ -239,10 +240,10 @@ void loop()
     if (hasSignal && (now - lastRx > NO_SIGNAL_TIMEOUT_MS))
     {
         hasSignal = false;
-        currentZone = 1; // reset so next signal starts fresh from zone 1
-        setHeartZone(1);
+        currentZone = 5; // reset so next signal starts fresh from zone 5
+        setHeartZone(5);
         initRssiBuffer(); // reset smoothing so stale values don't linger
-        Serial.println(F("** signal lost — back to zone 1 **"));
+        Serial.println(F("** signal lost — back to zone 5 **"));
     }
 
     // ── Advance NeoPixel animation ───────────────────────────────────────────

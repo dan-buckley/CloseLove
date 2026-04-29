@@ -6,12 +6,20 @@
 //
 // Animation model
 // ───────────────
-// Zones 1–4 breathe: brightness follows a sine-wave envelope so the LEDs
-// gently fade in and out with no visible stepping.
-// Zone 5 is solid: all eight LEDs on at a fixed 60% brightness.
+// Zone 1 (closest): all 8 LEDs, smooth sine breathing — never fully dark.
 //
-// Each call to ledsUpdate() computes the current brightness from millis(),
-// builds the frame, and pushes it to the strip. No delay() is used anywhere.
+// Zones 2–5 (growing heartbeat): LEDs expand from LED 4 (bottom point)
+// upward one row per beat, reach the full heart, then contract back down.
+// Each beat is one full sine cycle (0 → peak → 0). The starting row
+// depends on zone — farther zones start smaller and travel further:
+//
+//   Zone 2: 7 → 8 → 7            (3 beats, LED 0 bobs in/out at top)
+//   Zone 3: 5 → 7 → 8 → 7 → 5   (5 beats)
+//   Zone 4: 3 → 5 → 7 → 8 → 7 → 5 → 3  (7 beats)
+//   Zone 5: 1 → 3 → 5 → 7 → 8 → 7 → 5 → 3 → 1  (9 beats, starts at tip)
+//
+// Each call to ledsUpdate() computes the current frame from millis() and
+// pushes it to the strip. No delay() is used anywhere.
 //
 // Author: CloseLove project
 // Date:   2026-04-18
@@ -24,82 +32,110 @@
 
 static Adafruit_NeoPixel strip(NEO_COUNT, NEO_PIN, NEO_GRB + NEO_KHZ800);
 
-// ── Zone configuration tables (index 0 = zone 1) ──────────────────────────
+// ── Zone colour and peak brightness (index 0 = zone 1) ────────────────────
 
-// How many LEDs are lit for each zone.
-static const uint8_t ZONE_LED_COUNT[5] = {1, 3, 5, 7, 8};
-
-// Peak brightness (0–255) for each zone.
-// Zones 1–4 pulse between 0 and this value.
-// Zone 5 holds this value solid.
+// Peak brightness (0–255) for each zone before the LED_BRIGHTNESS master scale.
 static const uint8_t ZONE_PEAK[5] = {
-    20,  // Zone 1: ~8%  of full
-    38,  // Zone 2: ~15%
-    64,  // Zone 3: ~25%
-    102, // Zone 4: ~40%
-    153, // Zone 5: ~60%
+    240, // Zone 1: ~94% (closest) — breathing is 30%→100%→30% over BEAT_STEP_MS
+    90,  // Zone 2: stable floor 50% of peak (~45), peak 90
+    70,  // Zone 3: stable floor ~35, peak 70
+    50,  // Zone 4: stable floor ~25, peak 50
+    30,  // Zone 5: stable floor ~15, peak 30 (farthest)
 };
 
-// Base colour for each zone as a packed 0x00RRGGBB value.
-// Brightness is applied by scaleColour() before writing to the strip.
+// Base colour per zone as packed 0x00RRGGBB. Scaled by scaleColour() at render time.
 static const uint32_t ZONE_COLOUR[5] = {
-    0x000000FF, // Zone 1: blue
-    0x004400FF, // Zone 2: blue-purple
+    0x00FF0000, // Zone 1: red         (closest)
+    0x00FF4400, // Zone 2: orange-red
     0x00AA00CC, // Zone 3: purple
-    0x00FF4400, // Zone 4: orange-red
-    0x00FF0000, // Zone 5: red
+    0x004400FF, // Zone 4: blue-purple
+    0x000000FF, // Zone 5: blue        (farthest)
 };
+
+// ── Growing heartbeat LED sequences (zones 2–5) ───────────────────────────
+//
+// Each entry is the LED count for that beat step. LEDs are filled from
+// LED 4 (bottom point) upward using BOTTOM_UP_ORDER.
+// Array index 0 maps to zone 2; index 3 maps to zone 5.
+
+static const uint8_t SEQ_Z2[] = {7, 8, 7};
+static const uint8_t SEQ_Z3[] = {5, 7, 8, 7, 5};
+static const uint8_t SEQ_Z4[] = {3, 5, 7, 8, 7, 5, 3};
+static const uint8_t SEQ_Z5[] = {1, 3, 5, 7, 8, 7, 5, 3, 1};
+
+static const uint8_t *const ZONE_SEQ[4] = {SEQ_Z2, SEQ_Z3, SEQ_Z4, SEQ_Z5};
+static const uint8_t ZONE_SEQ_LEN[4] = {3, 5, 7, 9};
 
 // ── LED fill order ─────────────────────────────────────────────────────────
 //
-// LEDs are switched on from the left side of the heart outward so that
-// as the zone (and LED count) increases the lit area stays symmetric.
-//
-// Physical positions (chain index → heart location):
-//   0 = left side     1 = upper-left bump   2 = upper-right bump
-//   3 = right side    4 = lower-right       5 = bottom-right
-//   6 = bottom-left   7 = lower-left
-//
-// Fill sequence: 0 → 1 → 7 → 2 → 6 → 3 → 5 → 4
-static const uint8_t FILL_ORDER[NEO_COUNT] = {0, 1, 7, 2, 6, 3, 5, 4};
+// BOTTOM_UP_ORDER fills from LED 4 (bottom point) outward symmetrically:
+//   Count 1 → {4}
+//   Count 3 → {4, 5, 3}
+//   Count 5 → {4, 5, 3, 6, 2}
+//   Count 7 → {4, 5, 3, 6, 2, 7, 1}
+//   Count 8 → {4, 5, 3, 6, 2, 7, 1, 0}  (0 = top-centre dip, last to join)
+static const uint8_t BOTTOM_UP_ORDER[NEO_COUNT] = {4, 5, 3, 6, 2, 7, 1, 0};
 
 // ── Module state ───────────────────────────────────────────────────────────
 
 // Active zone and previous zone for cross-fade blending (both clamped to 1–5).
-static uint8_t currentZone = 1;
-static uint8_t prevZone = 1;
+static uint8_t currentZone = 5;
+static uint8_t prevZone = 5;
 
 // millis() timestamp when the last zone transition started.
 static uint32_t transitionStart = 0;
 
 // Boot searching mode: true until the RSSI buffer is fully seeded.
-// ledsUpdate() shows a chaser instead of the zone animation while this is set.
+// ledsUpdate() shows a bottom-to-top chaser while this is set.
 static bool isSearching = true;
+
+// Step tracking for the growing heartbeat (zones 2–5).
+// Resets whenever the active zone changes.
+static uint8_t beatStepZone = 0;       // zone these values belong to
+static uint8_t beatStepCur = 0;        // committed step index
+static uint8_t beatStepPending = 0xFF; // next step waiting to apply (0xFF = none)
+static uint8_t beatStepPrevCount = 0;  // LED count from the previous step (for incoming fade)
 
 // ── Internal helpers ───────────────────────────────────────────────────────
 
-// Scale a packed 0x00RRGGBB colour by brightness (0–255) then by LED_BRIGHTNESS.
+// Scale a packed 0x00RRGGBB colour by brightness (0–255).
+// LED_BRIGHTNESS is applied globally via strip.setBrightness() in ledsInit().
 static uint32_t scaleColour(uint32_t colour, uint8_t brightness)
 {
-    uint16_t scaled = (uint16_t)brightness * LED_BRIGHTNESS / 255;
-    uint8_t r = (uint8_t)(((colour >> 16) & 0xFF) * scaled / 255);
-    uint8_t g = (uint8_t)(((colour >> 8) & 0xFF) * scaled / 255);
-    uint8_t b = (uint8_t)((colour & 0xFF) * scaled / 255);
+    uint8_t r = (uint8_t)(((colour >> 16) & 0xFF) * brightness / 255);
+    uint8_t g = (uint8_t)(((colour >> 8) & 0xFF) * brightness / 255);
+    uint8_t b = (uint8_t)((colour & 0xFF) * brightness / 255);
     return strip.Color(r, g, b);
 }
 
-// Compute the current brightness for a breathing animation.
-// Uses a sine-wave envelope: brightness cycles smoothly between 0 and
-// peakBrightness with a full period of periodMs milliseconds.
-static uint8_t pulseLevel(uint8_t peakBrightness, uint16_t periodMs)
+// ── Wave helpers ──────────────────────────────────────────────────────────
+//
+// Full sine over one HEARTBEAT_MS period:
+//   phase 0.0 / 1.0 = trough (0%)   phase 0.5 = peak (100%)
+//   phase 0.25      = rising 50%    phase 0.75 = falling 50%
+//
+// Stable LEDs use max(50%, sineLevel) — floor at 50%, never dark.
+// Incoming/outgoing LEDs use sineLevel directly — fade in/out through 0%.
+
+// Brightness fraction (0.0–1.0) following a full sine over HEARTBEAT_MS.
+static float sineLevel(float phase)
 {
-    // phase: 0.0 at the start of each period, 1.0 at the end
-    float phase = (float)(millis() % (uint32_t)periodMs) / (float)periodMs;
+    return (1.0f - cosf(phase * 2.0f * (float)M_PI)) * 0.5f;
+}
 
-    // sine goes -1 → +1 over one full cycle; shift and scale to 0 → 1
-    // sine goes -1 → +1; scale to 0.5 → 1.0 so the pulse never goes below 50%
-    float t = (sinf(phase * 2.0f * (float)M_PI) + 1.0f) * 0.25f + 0.5f;
+// Very subtle colour-pulse factor (±6%) at COLOUR_PULSE_MS.
+static float colourPulse()
+{
+    float phase = (float)(millis() % (uint32_t)COLOUR_PULSE_MS) / (float)COLOUR_PULSE_MS;
+    return 0.94f + 0.06f * ((sinf(phase * 2.0f * (float)M_PI) + 1.0f) * 0.5f);
+}
 
+// Zone 1 breathing: 30%→100%→30% over BEAT_STEP_MS period so it is
+// clearly visible as a slow swell independent of the heartbeat rhythm.
+static uint8_t breathLevel(uint8_t peakBrightness)
+{
+    float phase = (float)(millis() % (uint32_t)BEAT_STEP_MS) / (float)BEAT_STEP_MS;
+    float t = 0.65f - 0.35f * cosf(phase * 2.0f * (float)M_PI);
     return (uint8_t)(peakBrightness * t);
 }
 
@@ -109,6 +145,7 @@ static uint8_t pulseLevel(uint8_t peakBrightness, uint16_t periodMs)
 void ledsInit()
 {
     strip.begin();
+    strip.setBrightness(LED_BRIGHTNESS);
     strip.clear();
     strip.show();
 }
@@ -139,46 +176,103 @@ void ledsUpdate()
 {
     if (isSearching)
     {
-        // Chase a single dim-red pixel around the heart, scaled by LED_BRIGHTNESS.
+        // Single red pixel chases from bottom point up through the heart,
+        // pulsing in brightness for a more alive searching feel.
         uint8_t pos = (uint8_t)((millis() / 100) % NEO_COUNT);
-        uint8_t chaserBright = (uint8_t)(80U * LED_BRIGHTNESS / 255);
+        float phase = (float)(millis() % 800U) / 800.0f;
+        float t = (sinf(phase * 2.0f * (float)M_PI) + 1.0f) * 0.5f;
+        uint8_t chaserBright = (uint8_t)(40 + 80.0f * t);
         strip.clear();
-        strip.setPixelColor(FILL_ORDER[pos], strip.Color(chaserBright, 0, 0));
+        strip.setPixelColor(BOTTOM_UP_ORDER[pos], strip.Color(chaserBright, 0, 0));
         strip.show();
         return;
     }
 
-    // ── Zone transition blend factor (0 = previous zone, 1 = current zone) ──
-    float t = 1.0f;
+    // ── Zone transition blend factor (0.0 = previous zone, 1.0 = current) ──
+    float blend = 1.0f;
     uint32_t elapsed = millis() - transitionStart;
     if (elapsed < TRANSITION_MS)
-        t = (float)elapsed / (float)TRANSITION_MS;
+        blend = (float)elapsed / (float)TRANSITION_MS;
 
     uint8_t prevIdx = prevZone - 1;
     uint8_t curIdx = currentZone - 1;
-    float inv = 1.0f - t;
-
-    // ── Blend LED count ────────────────────────────────────────────────────
-    uint8_t numLeds = (uint8_t)(ZONE_LED_COUNT[prevIdx] * inv + ZONE_LED_COUNT[curIdx] * t + 0.5f);
+    float inv = 1.0f - blend;
 
     // ── Blend colour channels ──────────────────────────────────────────────
     uint32_t pc = ZONE_COLOUR[prevIdx];
     uint32_t cc = ZONE_COLOUR[curIdx];
-    uint8_t cr = (uint8_t)(((pc >> 16) & 0xFF) * inv + ((cc >> 16) & 0xFF) * t);
-    uint8_t cg = (uint8_t)(((pc >> 8) & 0xFF) * inv + ((cc >> 8) & 0xFF) * t);
-    uint8_t cb = (uint8_t)((pc & 0xFF) * inv + (cc & 0xFF) * t);
+    uint8_t cr = (uint8_t)(((pc >> 16) & 0xFF) * inv + ((cc >> 16) & 0xFF) * blend);
+    uint8_t cg = (uint8_t)(((pc >> 8) & 0xFF) * inv + ((cc >> 8) & 0xFF) * blend);
+    uint8_t cb = (uint8_t)((pc & 0xFF) * inv + (cc & 0xFF) * blend);
+    // Apply slow colour pulse — gently modulates the zone colour independently
+    // of the heartbeat brightness, giving a living "glow" feel.
+    float cp = colourPulse();
+    cr = (uint8_t)(cr * cp);
+    cg = (uint8_t)(cg * cp);
+    cb = (uint8_t)(cb * cp);
     uint32_t blendedColour = ((uint32_t)cr << 16) | ((uint32_t)cg << 8) | cb;
 
     // ── Blend peak brightness ──────────────────────────────────────────────
-    uint8_t blendedPeak = (uint8_t)(ZONE_PEAK[prevIdx] * inv + ZONE_PEAK[curIdx] * t);
+    uint8_t blendedPeak = (uint8_t)(ZONE_PEAK[prevIdx] * inv + ZONE_PEAK[curIdx] * blend);
 
-    // ── 60 bpm heartbeat pulse applied to all zones ────────────────────────
-    uint8_t brightness = pulseLevel(blendedPeak, HEARTBEAT_MS);
-
-    // ── Build frame ────────────────────────────────────────────────────────
+    // ── Build and push frame ───────────────────────────────────────────────
     strip.clear();
-    uint32_t scaledColour = scaleColour(blendedColour, brightness);
-    for (uint8_t i = 0; i < numLeds; i++)
-        strip.setPixelColor(FILL_ORDER[i], scaledColour);
+
+    if (currentZone == 1)
+    {
+        // Zone 1: all 8 LEDs, 30%→100%→30% slow breath over BEAT_STEP_MS.
+        uint8_t brightness = breathLevel(blendedPeak);
+        uint32_t c = scaleColour(blendedColour, brightness);
+        for (uint8_t i = 0; i < NEO_COUNT; i++)
+            strip.setPixelColor(BOTTOM_UP_ORDER[i], c);
+    }
+    else
+    {
+        // Zones 2–5: growing heartbeat.
+        // Stable LEDs (same before and after step): sine with 50% floor.
+        // Incoming LEDs (just added this step): full sine from 0% up to join at 50%.
+        // Outgoing LEDs (leaving next step): full sine back down to 0%.
+        // Step commits at the trough (sineLevel≈0) so entries/exits are seamless.
+        uint8_t zoneIdx = currentZone - 2;
+        uint8_t seqLen = ZONE_SEQ_LEN[zoneIdx];
+        uint32_t now = millis();
+
+        // Reset on zone change.
+        if (currentZone != beatStepZone)
+        {
+            beatStepZone = currentZone;
+            beatStepCur = (uint8_t)((now / BEAT_STEP_MS) % seqLen);
+            beatStepPending = 0xFF;
+            beatStepPrevCount = ZONE_SEQ[zoneIdx][beatStepCur];
+        }
+
+        float beatPhase = (float)(now % (uint32_t)HEARTBEAT_MS) / (float)HEARTBEAT_MS;
+        uint8_t newStep = (uint8_t)((now / BEAT_STEP_MS) % seqLen);
+        if (newStep != beatStepCur)
+            beatStepPending = newStep;
+        // Commit at trough so incoming LEDs start from 0% and outgoing finish at 0%.
+        if (beatStepPending != 0xFF && beatPhase < 0.05f)
+        {
+            beatStepPrevCount = ZONE_SEQ[zoneIdx][beatStepCur];
+            beatStepCur = beatStepPending;
+            beatStepPending = 0xFF;
+        }
+
+        uint8_t currentCount = ZONE_SEQ[zoneIdx][beatStepCur];
+        uint8_t nextStep = (uint8_t)((beatStepCur + 1) % seqLen);
+        uint8_t nextCount = ZONE_SEQ[zoneIdx][nextStep];
+        float sine = sineLevel(beatPhase);
+
+        for (uint8_t i = 0; i < currentCount; i++)
+        {
+            // Incoming (wasn't lit last step) or outgoing (won't be lit next step):
+            // follow full sine so they fade in from 0% and out to 0%.
+            bool transitioning = (i >= beatStepPrevCount) || (i >= nextCount);
+            float level = transitioning ? sine : fmaxf(0.5f, sine);
+            uint8_t brightness = (uint8_t)(blendedPeak * level);
+            strip.setPixelColor(BOTTOM_UP_ORDER[i], scaleColour(blendedColour, brightness));
+        }
+    }
+
     strip.show();
 }
